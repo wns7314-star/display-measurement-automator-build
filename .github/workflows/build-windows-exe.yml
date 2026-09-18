@@ -1,0 +1,65 @@
+name: Build Windows EXE
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt PyInstaller==6.16.0
+
+      - name: Run source tests
+        run: python test_measurement_ocr_v2.py
+
+      - name: Build Windows application
+        run: pyinstaller --noconfirm --clean DisplayMeasurementAutomator.spec
+
+      - name: Run bundled OCR smoke test
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist\DisplayMeasurementAutomator\DisplayMeasurementAutomator.exe" `
+            -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Bundled OCR smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Add user files
+        shell: pwsh
+        run: |
+          Copy-Item "RUN_EXE_SELF_TEST.bat" "dist\DisplayMeasurementAutomator\"
+          Copy-Item "README_사용방법.md" "dist\DisplayMeasurementAutomator\"
+          Copy-Item "TEST_REPORT.md" "dist\DisplayMeasurementAutomator\"
+          if (Test-Path "사용설명서") {
+            Copy-Item "사용설명서" "dist\DisplayMeasurementAutomator\사용설명서" -Recurse
+          }
+
+      - name: Create ZIP package
+        shell: pwsh
+        run: >-
+          Compress-Archive -Path "dist\DisplayMeasurementAutomator"
+          -DestinationPath "DisplayMeasurementAutomator_Windows_v2.1.0.zip"
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DisplayMeasurementAutomator_Windows_v2.1.0
+          path: DisplayMeasurementAutomator_Windows_v2.1.0.zip
+          if-no-files-found: error
