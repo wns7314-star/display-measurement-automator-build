@@ -1693,7 +1693,7 @@ def _write_workbook(
                 "bold": True,
                 "border": 1,
                 "bg_color": "#D9EAF7",
-                "num_format": "0.#########",
+                "num_format": "0.00#######",
             }
         )
         numeric_formats: dict[tuple[int, bool], object] = {}
@@ -1765,7 +1765,7 @@ def _write_workbook(
 
         average_row = len(selected) + 1
         sheet.write_string(average_row, 0, "평균", average)
-        sheet.write_string(average_row, 1, "", average)
+        sheet.write_blank(average_row, 1, None, average)
         if not compact:
             sheet.write_string(average_row, 2, "숫자 셀 기준", average)
         for offset, column in enumerate(columns):
