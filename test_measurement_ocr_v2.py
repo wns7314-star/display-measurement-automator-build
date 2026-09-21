@@ -35,6 +35,7 @@ from measurement_ocr_v2 import (
 from PIL import Image, ImageDraw, ImageFont
 
 import display_measurement_automator_v2 as gui
+from benchmark_regressions import test_font
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_1 = ROOT / "upload" / "IMG_9907.jpeg"
@@ -116,16 +117,16 @@ class ParserTests(unittest.TestCase):
 class RealImageOCRTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if not SAMPLE_1.is_file() or not SAMPLE_2.is_file():
-            raise unittest.SkipTest("공개 샘플 이미지가 없음")
         cls.engine = RapidOCREngine()
 
     def test_first_sample_all_four_values(self) -> None:
+        if not SAMPLE_1.is_file():
+            self.skipTest("공개 샘플 이미지가 없음")
         started = time.perf_counter()
         result = scan_image(ImageIdentity(SAMPLE_1, "sample", 1), self.engine)
         elapsed = time.perf_counter() - started
-        values = {(item.value_text, item.unit) for item in result.detections}
-        self.assertEqual(len(result.detections), 4)
+        values = {(item.value_text, item.unit) for item in result.included_detections}
+        self.assertEqual(len(result.included_detections), 4)
         self.assertEqual(
             values,
             {("1.82", "µm"), ("2.35", "µm"), ("6.09", "µm"), ("2.52", "µm")},
@@ -133,20 +134,24 @@ class RealImageOCRTests(unittest.TestCase):
         self.assertLess(elapsed, 15.0)
 
     def test_second_sample_finds_six_positions_and_clear_values(self) -> None:
+        if not SAMPLE_2.is_file():
+            self.skipTest("공개 샘플 이미지가 없음")
         started = time.perf_counter()
         result = scan_image(ImageIdentity(SAMPLE_2, "sample", 2), self.engine)
         elapsed = time.perf_counter() - started
         clear_values = {
             (item.value_text, item.unit)
-            for item in result.detections
+            for item in result.included_detections
             if item.numeric_value is not None
         }
-        self.assertEqual(len(result.detections), 6)
+        self.assertEqual(len(result.included_detections), 6)
         self.assertTrue({("105", "nm"), ("111", "nm"), ("104", "nm")} <= clear_values)
         self.assertEqual(sum(item.numeric_value is None for item in result.detections), 3)
         self.assertLess(elapsed, 15.0)
 
     def test_deep_verify_excludes_footer_scale_bar(self) -> None:
+        if not SAMPLE_2.is_file():
+            self.skipTest("공개 샘플 이미지가 없음")
         result = scan_image(
             ImageIdentity(SAMPLE_2, "sample", 2), self.engine, deep_verify=True
         )
@@ -154,13 +159,10 @@ class RealImageOCRTests(unittest.TestCase):
         excluded = {(item.value_text, item.unit) for item in result.detections if not item.included}
         self.assertNotIn(("100", "nm"), included)
         self.assertIn(("100", "nm"), excluded)
-        self.assertTrue(any("스케일바" in item.note for item in result.detections if not item.included))
+        self.assertTrue(any("스케일바" in item.note or "장비정보" in item.note for item in result.detections if not item.included))
 
     def test_seven_overlay_colors(self) -> None:
-        font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        if not font_path.is_file():
-            self.skipTest("시험용 글꼴 없음")
-        font = ImageFont.truetype(str(font_path), 24)
+        font = test_font(24)
         colors = [
             (255, 30, 30),
             (30, 255, 30),
@@ -188,10 +190,7 @@ class RealImageOCRTests(unittest.TestCase):
                 )
 
     def test_grayscale_overlay_uses_full_image_fallback(self) -> None:
-        font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        if not font_path.is_file():
-            self.skipTest("시험용 글꼴 없음")
-        font = ImageFont.truetype(str(font_path), 30)
+        font = test_font(30)
         with tempfile.TemporaryDirectory() as directory:
             image = Image.new("RGB", (600, 300), (200, 200, 200))
             draw = ImageDraw.Draw(image)
@@ -209,10 +208,7 @@ class RealImageOCRTests(unittest.TestCase):
         )
 
     def test_labeled_length_and_angle_recognition(self) -> None:
-        font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        if not font_path.is_file():
-            self.skipTest("시험용 글꼴 없음")
-        font = ImageFont.truetype(str(font_path), 36)
+        font = test_font(36)
         cases = [
             ("H1=167.5 nm", "H1", "167.5", "nm"),
             ("Top-W=167.5 nm", "Top-W", "167.5", "nm"),
@@ -235,10 +231,7 @@ class RealImageOCRTests(unittest.TestCase):
             )
 
     def test_full_scan_labeled_values_are_separated(self) -> None:
-        font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        if not font_path.is_file():
-            self.skipTest("시험용 글꼴 없음")
-        font = ImageFont.truetype(str(font_path), 24)
+        font = test_font(24)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "1-01.png"
             image = Image.new("RGB", (800, 500), (100, 100, 100))

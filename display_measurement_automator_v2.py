@@ -695,7 +695,7 @@ class MeasurementAutomatorApp:
         self.deep_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             actions,
-            text="정밀 재검증(느림)",
+            text="더 작은 글자 정밀 검사",
             variable=self.deep_var,
         ).pack(side="right")
 
@@ -725,6 +725,8 @@ class MeasurementAutomatorApp:
 
         bottom = ttk.Frame(self.root, padding=(14, 0, 14, 14))
         bottom.pack(fill="x")
+        self.detailed_excel_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bottom, text="상세 Excel", variable=self.detailed_excel_var).pack(side="left", padx=(0, 8))
         self.scan_button = ttk.Button(bottom, text="전체 검사", command=self._start_scan)
         self.scan_button.pack(side="left")
         self.cancel_button = ttk.Button(bottom, text="검사 취소", command=self._cancel_scan, state="disabled")
@@ -942,6 +944,7 @@ class MeasurementAutomatorApp:
                 selected,
                 template=self.template,
                 overwrite=True,
+                compact=not self.detailed_excel_var.get(),
             )
         except Exception as exc:
             messagebox.showerror("Excel 저장 실패", str(exc), parent=self.root)
@@ -958,7 +961,7 @@ class MeasurementAutomatorApp:
 
 
 def runtime_smoke_test() -> bool:
-    """Verify that the bundled OCR engine and its local models can run."""
+    """Exercise local models, edge discovery, faint text and the XLSX writer."""
 
     import cv2
     import numpy as np
@@ -978,10 +981,34 @@ def runtime_smoke_test() -> bool:
     attempts = engine.recognize_region(
         image, Box(0, 0, image.shape[1], image.shape[0]), "internal_horizontal"
     )
-    return any(
+    if not any(
         (attempt.value_text, attempt.unit) == ("2.35", "µm")
         for attempt in attempts
-    )
+    ):
+        return False
+    import tempfile
+    from PIL import ImageDraw, ImageFont
+    from measurement_ocr_v2 import ImageIdentity, scan_image, verify_xlsx
+
+    image = Image.new("RGB", (640, 400), (150, 150, 150))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=24)
+    draw.text((0, 40), "15.2 deg", font=font, fill=(245, 245, 245))
+    text = "28.4 deg"
+    width = draw.textbbox((0, 0), text, font=font)[2]
+    draw.text((640 - width, 130), text, font=font, fill=(30, 240, 240))
+    draw.text((245, 265), "167.5 nm", font=ImageFont.load_default(size=16), fill=(178, 178, 178))
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "self_test.png"
+        image.save(path)
+        result = scan_image(ImageIdentity(path, "self-test", 1), engine)
+        values = {(d.value_text, d.unit) for d in result.included_detections}
+        if result.error or values != {("15.2", "°"), ("28.4", "°"), ("167.5", "nm")}:
+            return False
+        output = Path(directory) / "self_test.xlsx"
+        export_excel([result], output)
+        verify_xlsx(output)
+    return True
 
 
 def main() -> int:

@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 SUPPORTED_SUFFIXES = {
     ".bmp",
     ".dib",
@@ -724,8 +724,8 @@ def detect_colored_measurement_regions(
         if word is not None:
             pad_x, pad_y = 12, 7
             region = Box(
-                max(0, word.x - pad_x),
-                max(0, word.y - pad_y),
+                word.x - pad_x,
+                word.y - pad_y,
                 word.w + pad_x * 2,
                 word.h + pad_y * 2,
                 word.area,
@@ -777,6 +777,99 @@ def _chroma_projection(crop: np.ndarray, low: int = 4) -> np.ndarray:
     return cv2.cvtColor(gray.astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
 
+def _contrast_projection(rgb: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    # Stretch only existing pixel information; never synthesize digits.
+    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def search_tiles(width: int, height: int, side: int = 640, overlap: int = 128) -> list[Box]:
+    """Cover every original pixel, including borders, with overlapping tiles."""
+    if side <= 0 or not 0 <= overlap < side:
+        raise ValueError("Invalid tile size/overlap")
+    def starts(length: int) -> list[int]:
+        if length <= side:
+            return [0]
+        positions = list(range(0, length - side + 1, side - overlap))
+        if positions[-1] != length - side:
+            positions.append(length - side)
+        return positions
+    return [Box(x, y, min(side, width - x), min(side, height - y))
+            for y in starts(height) for x in starts(width)]
+
+
+def _same_text_box(first: Box, second: Box) -> bool:
+    """Use physical overlap, not 9% of the entire image (which merged neighbours)."""
+    iw = max(0, min(first.x2, second.x2) - max(first.x, second.x))
+    ih = max(0, min(first.y2, second.y2) - max(first.y, second.y))
+    smaller = min(first.w * first.h, second.w * second.h)
+    if not smaller or iw * ih / smaller < 0.55:
+        return False
+    return abs(first.cy - second.cy) <= max(first.h, second.h) * 0.55
+
+
+def detect_unanchored_color_text(rgb: np.ndarray) -> list[tuple[Box, str]]:
+    """Find colored glyph groups even when the neural detector misses a small word."""
+    height, width = rgb.shape[:2]
+    base, lines, text, _ = _color_layers(rgb)
+    if np.count_nonzero(base) > base.size * 0.20:
+        return []  # Dense colored backgrounds use the general text detector.
+    output: list[tuple[Box, str]] = []
+    for kernel, orientation in [((3, 13), "horizontal"), ((13, 3), "vertical")]:
+        joined = cv2.morphologyEx(text, cv2.MORPH_CLOSE, np.ones(kernel, np.uint8))
+        for box in _components(joined, 20):
+            long_side, short_side = max(box.w, box.h), min(box.w, box.h)
+            if not (18 <= long_side <= 500 and 5 <= short_side <= 60):
+                continue
+            if orientation == "horizontal" and box.w < box.h * 1.8:
+                continue
+            if orientation == "vertical" and box.h < box.w * 1.8:
+                continue
+            region = Box(box.x - 5, box.y - 4, box.w + 10, box.h + 8).clipped(width, height)
+            output.append((region, orientation))
+    # A whole vertical word must not be suppressed by an earlier single-glyph box.
+    deduped = []
+    for region, orientation in sorted(output, key=lambda pair: pair[0].w * pair[0].h, reverse=True):
+        if not any(_same_text_box(region, other) for other, _ in deduped):
+            deduped.append((region, orientation))
+    return deduped
+
+
+def is_scale_bar_candidate(rgb: np.ndarray, box: Box, attempt: OCRAttempt) -> bool:
+    """Only a unitless-name length near an actual footer bar is excluded.
+
+    Angles and named points are not scale bars, even at the bottom edge.
+    """
+    height, width = rgb.shape[:2]
+    if attempt.unit not in {"nm", "µm"} or attempt.point_name or box.cy < height * 0.85:
+        return False
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    x0, x1 = max(0, box.x - box.w), min(width, box.x2 + box.w)
+    radius = max(15, int(box.h * 2.2))
+    y0, y1 = max(0, box.y - radius), min(height, box.y2 + radius)
+    band = gray[y0:y1, x0:x1]
+    if band.size == 0:
+        return False
+    length = max(10, int(box.w * 0.2))
+    _, binary = cv2.threshold(band, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    side_lines = []
+    for mask in (binary, cv2.bitwise_not(binary)):
+        lines = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, length), np.uint8))
+        for line in _components(lines, length):
+            if line.h > max(5, box.h * 0.4) or line.w < length:
+                continue
+            ly = y0 + line.cy
+            lx, rx = x0 + line.x, x0 + line.x2
+            if not box.y - 2 <= ly <= box.y2 + 2 and lx < box.cx < rx:
+                return True
+            if box.y <= ly <= box.y2 and (rx <= box.x + box.w * 0.4 or lx >= box.x2 - box.w * 0.4):
+                side_lines.append((lx, rx, ly))
+    return any(left[1] <= box.cx <= right[0] and abs(left[2] - right[2]) <= 3
+               for left in side_lines for right in side_lines if left != right)
+
+
 class RapidOCREngine:
     """In-process local OCR.  No image or OCR text is sent over the network."""
 
@@ -819,19 +912,21 @@ class RapidOCREngine:
         if crop.size == 0:
             return []
         variants: list[tuple[str, np.ndarray]] = [
-            ("raw", crop),
+            ("raw", cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)),
             ("chroma", _chroma_projection(crop)),
         ]
         if "vertical" in orientation or region.h > region.w * 1.15:
             variants.extend(
                 [
-                    ("raw_rot90", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+                    ("raw_rot90", cv2.rotate(cv2.cvtColor(crop, cv2.COLOR_RGB2BGR), cv2.ROTATE_90_COUNTERCLOCKWISE)),
                     (
                         "chroma_rot90",
                         cv2.rotate(
                             _chroma_projection(crop), cv2.ROTATE_90_COUNTERCLOCKWISE
                         ),
                     ),
+                    ("raw_rot270", cv2.rotate(cv2.cvtColor(crop, cv2.COLOR_RGB2BGR), cv2.ROTATE_90_CLOCKWISE)),
+                    ("chroma_rot270", cv2.rotate(_chroma_projection(crop), cv2.ROTATE_90_CLOCKWISE)),
                 ]
             )
         if orientation == "internal_vertical":
@@ -841,7 +936,7 @@ class RapidOCREngine:
             mid = crop[y0:y1, :]
             if mid.size:
                 variants.extend(
-                    [("mid_raw", mid), ("mid_chroma", _chroma_projection(mid))]
+                    [("mid_raw", cv2.cvtColor(mid, cv2.COLOR_RGB2BGR)), ("mid_chroma", _chroma_projection(mid))]
                 )
         attempts: list[OCRAttempt] = []
         for mode, variant in variants:
@@ -873,16 +968,58 @@ class RapidOCREngine:
         return attempts
 
     def detect_full_image(
-        self, rgb: np.ndarray
+        self, rgb: np.ndarray, *, deep_verify: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[tuple[Box, OCRAttempt]]:
+        """Whole-frame search plus magnified overlapping tiles, always enabled."""
+        height, width = rgb.shape[:2]
+        detections: list[tuple[Box, OCRAttempt]] = []
+        views = [(Box(0, 0, width, height), "raw", 1.0)]
+        for box in search_tiles(width, height, side=480 if deep_verify else 640):
+            views.append((box, "contrast", 2.0))
+            crop = rgb[box.y:box.y2, box.x:box.x2]
+            chroma = crop.max(axis=2).astype(np.int16) - crop.min(axis=2).astype(np.int16)
+            if np.count_nonzero(chroma > 8) >= 16:
+                views.append((box, "chroma", 2.0))
+        for region, mode, scale in views:
+            if cancelled and cancelled():
+                raise BatchCancelled("사용자가 검사를 취소했습니다.")
+            crop = rgb[region.y:region.y2, region.x:region.x2]
+            if mode == "raw":
+                view = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+            elif mode == "chroma":
+                view = _chroma_projection(crop, low=2)
+            else:
+                view = _contrast_projection(crop)
+            if scale != 1:
+                view = cv2.resize(view, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            pad = 32
+            # Constant median margin avoids repeating edge glyphs or adding false digits.
+            background = tuple(float(x) for x in np.median(view.reshape(-1, 3), axis=0))
+            view = cv2.copyMakeBorder(view, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=background)
+            for box, attempt in self._detect_view(view):
+                x1 = int(math.floor((box.x - pad) / scale)) + region.x
+                y1 = int(math.floor((box.y - pad) / scale)) + region.y
+                x2 = int(math.ceil((box.x2 - pad) / scale)) + region.x
+                y2 = int(math.ceil((box.y2 - pad) / scale)) + region.y
+                mapped = Box(x1, y1, x2 - x1, y2 - y1).clipped(width, height)
+                if mapped.w and mapped.h:
+                    attempt.mode = mode + (":metadata" if "metadata" in attempt.mode else "")
+                    detections.append((mapped, attempt))
+        return detections
+
+    def _detect_view(self, bgr: np.ndarray) -> list[tuple[Box, OCRAttempt]]:
         try:
-            output = self._engine(rgb, use_det=True, use_cls=True, use_rec=True)
+            output = self._engine(bgr, use_det=True, use_cls=True, use_rec=True)
         except Exception as exc:
             raise MeasurementError(f"전체 이미지 OCR 실패: {exc}") from exc
         if output.txts is None or output.boxes is None:
             return []
         scores = output.scores or tuple(0.0 for _ in output.txts)
         detections: list[tuple[Box, OCRAttempt]] = []
+        metadata_boxes = [np.asarray(points, dtype=float) for points, text in zip(output.boxes, output.txts)
+                          if re.search(r"\b(?:HFW|HV|WD|MAG|TILT|EHT)\b", str(text), re.IGNORECASE)]
+        metadata_top = min((b[:, 1].min() for b in metadata_boxes), default=float("inf"))
         for points, text, confidence in zip(output.boxes, output.txts, scores):
             parsed_items = parse_measurement_items(str(text))
             if not parsed_items:
@@ -898,7 +1035,7 @@ class RapidOCREngine:
                         OCRAttempt(
                             text=str(text),
                             confidence=float(confidence),
-                            mode="full_image",
+                            mode="metadata" if len(metadata_boxes) >= 2 and box.y >= metadata_top - 5 else "full_image",
                             value_text=parsed.value_text,
                             unit=parsed.unit,
                             point_name=parsed.point_name,
@@ -1022,7 +1159,7 @@ def _merge_full_image_attempts(
             (
                 detection
                 for detection in result.detections
-                if _centers_close(detection.box, box, result.image_width, result.image_height)
+                if _same_text_box(detection.box, box)
                 and (
                     detection.numeric_value is None
                     or (
@@ -1032,9 +1169,10 @@ def _merge_full_image_attempts(
                         == point_name_key(attempt.point_name)
                     )
                     or (
-                        detection.value_text == attempt.value_text
-                        and detection.unit == attempt.unit
-                        and not (detection.point_name and attempt.point_name)
+                        (not (detection.point_name and attempt.point_name) or
+                         (detection.value_text, detection.unit) == (attempt.value_text, attempt.unit))
+                        and (not detection.alternatives or
+                             detection.alternatives[0].item_index == attempt.item_index)
                     )
                 )
             ),
@@ -1053,9 +1191,9 @@ def _merge_full_image_attempts(
                 existing.note = "전체 이미지 OCR로 보완" + (
                     "; 낮은 OCR 신뢰도" if attempt.confidence < 0.75 else ""
                 )
-            elif not existing.point_name and attempt.point_name:
+            if not existing.point_name and attempt.point_name:
                 existing.point_name = attempt.point_name
-            elif (existing.value_text, existing.unit) != (
+            if (existing.value_text, existing.unit) != (
                 attempt.value_text,
                 attempt.unit,
             ):
@@ -1065,7 +1203,6 @@ def _merge_full_image_attempts(
                 ) + f"전체 OCR와 불일치({attempt.value_text} {attempt.unit})"
             continue
 
-        footer = box.cy >= result.image_height * 0.87
         item = MeasurementDetection(
             detection_id=f"F{len(result.detections) + 1}",
             box=box.clipped(result.image_width, result.image_height),
@@ -1076,15 +1213,11 @@ def _merge_full_image_attempts(
             point_name=attempt.point_name,
             raw_text=attempt.text,
             confidence=attempt.confidence,
-            source_mode="full_image",
+            source_mode=f"full_image:{attempt.mode}",
             orientation="horizontal",
-            included=not footer,
-            review_required=footer or attempt.confidence < 0.75,
-            note=(
-                "하단 스케일바/장비정보 후보 — 기본 제외"
-                if footer
-                else "색상 측정선이 없어 전체 이미지 OCR로 검출"
-            ),
+            included=True,
+            review_required=attempt.confidence < 0.75,
+            note="전체 이미지/확대 영역 OCR로 검출",
             alternatives=[attempt],
         )
         result.detections.append(item)
@@ -1095,6 +1228,7 @@ def scan_image(
     engine: RapidOCREngine,
     *,
     deep_verify: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ImageScanResult:
     started = time.perf_counter()
     try:
@@ -1113,6 +1247,8 @@ def scan_image(
         regions, threshold = detect_colored_measurement_regions(rgb)
         result.color_threshold = threshold
         for index, (region, orientation) in enumerate(regions, 1):
+            if cancelled and cancelled():
+                raise BatchCancelled("사용자가 검사를 취소했습니다.")
             attempts = engine.recognize_region(rgb, region, orientation)
             items = _build_region_detections(
                 f"C{index}",
@@ -1122,31 +1258,38 @@ def scan_image(
                 height,
                 attempts,
             )
-            for item in items:
-                if item.box.cy >= height * 0.88:
-                    item.included = False
-                    item.review_required = True
-                    item.note = (
-                        item.note + "; " if item.note else ""
-                    ) + "하단 스케일바/장비정보 후보 — 기본 제외"
-                result.detections.append(item)
+            result.detections.extend(items)
 
-        parsed_ratio = (
-            sum(item.numeric_value is not None for item in result.detections)
-            / len(result.detections)
-            if result.detections
-            else 0.0
-        )
-        if deep_verify or not regions or parsed_ratio < 0.35:
-            full_items = engine.detect_full_image(rgb)
-            result.used_full_fallback = True
-            _merge_full_image_attempts(result, full_items)
+        for region, orientation in detect_unanchored_color_text(rgb):
+            if cancelled and cancelled():
+                raise BatchCancelled("사용자가 검사를 취소했습니다.")
+            # Preserve the known anchor reading; this pass only rescues uncovered glyphs.
+            if any(_same_text_box(region, d.box) for d in result.detections):
+                continue
+            attempts = engine.recognize_region(rgb, region, orientation)
+            _merge_full_image_attempts(result, [(region, a) for a in attempts if a.valid])
+
+        full_items = engine.detect_full_image(rgb, deep_verify=deep_verify, cancelled=cancelled)
+        result.used_full_fallback = True
+        _merge_full_image_attempts(result, full_items)
+        for item in result.detections:
+            attempt = OCRAttempt(item.raw_text, item.confidence, item.source_mode,
+                                 item.value_text, item.unit, item.point_name)
+            metadata = item.box.cy >= height * 0.85 and (
+                any("metadata" in a.mode for a in item.alternatives)
+                or bool(re.search(r"\b(?:HFW|HV|WD|MAG|TILT|EHT)\b", item.raw_text, re.IGNORECASE)))
+            if metadata or is_scale_bar_candidate(rgb, item.box, attempt):
+                item.included = False
+                item.review_required = True
+                _append_note(item, "하단 장비정보 확인 — 기본 제외" if metadata else "하단 스케일바 선 확인 — 기본 제외")
 
         mark_duplicate_point_names(result)
         order_result_by_groups(result, derive_group_order(result.detections))
         result.selected = any(item.included for item in result.detections)
         result.elapsed_seconds = time.perf_counter() - started
         return result
+    except BatchCancelled:
+        raise
     except Exception as exc:
         return ImageScanResult(
             path=identity.path,
@@ -1179,7 +1322,7 @@ def scan_images(
             raise BatchCancelled("사용자가 검사를 취소했습니다.")
         if progress:
             progress(index, total, identity.path)
-        results.append(scan_image(identity, engine, deep_verify=deep_verify))
+        results.append(scan_image(identity, engine, deep_verify=deep_verify, cancelled=cancelled))
     return results
 
 
@@ -1485,6 +1628,7 @@ def _write_workbook(
     path: Path,
     results: Sequence[ImageScanResult],
     template: MeasurementTemplate | None,
+    compact: bool = True,
 ) -> tuple[int, int, int]:
     try:
         import xlsxwriter
@@ -1509,7 +1653,7 @@ def _write_workbook(
             {
                 "title": "디스플레이 구조분석 측정값",
                 "subject": "FIB/SEM 이미지 측정값 자동 검출 결과",
-                "author": "디스플레이 측정값 자동 정리 v2.1",
+                "author": f"디스플레이 측정값 자동 정리 v{APP_VERSION}",
                 "comments": "확인 필요 항목은 원본 이미지와 대조한 뒤 사용하세요.",
             }
         )
@@ -1572,20 +1716,24 @@ def _write_workbook(
             return numeric_formats[key]
 
         sheet = workbook.add_worksheet("측정 데이터")
-        fixed = ["시료번호", "이미지 순번", "데이터 이미지"]
+        fixed = ["시료번호", "파일명"] if compact else ["시료번호", "이미지 순번", "데이터 이미지"]
+        data_start = len(fixed)
         measurement_headers = [
             f"{column.label} ({units[column.key][0]})"
             for column in columns
         ]
-        tail = ["판독상태", "검토 필요 수", "소요시간(초)", "원본 경로"]
+        tail = [] if compact else ["판독상태", "검토 필요 수", "소요시간(초)", "원본 경로"]
         headings = fixed + measurement_headers + tail
         for col, heading in enumerate(headings):
             sheet.write_string(0, col, heading, header)
 
         for row, result in enumerate(selected, 1):
             sheet.write_string(row, 0, result.sample_id, center)
-            sheet.write_number(row, 1, result.image_index, center)
-            sheet.write_string(row, 2, result.path.name, normal)
+            if compact:
+                sheet.write_string(row, 1, result.path.name, normal)
+            else:
+                sheet.write_number(row, 1, result.image_index, center)
+                sheet.write_string(row, 2, result.path.name, normal)
             by_key = {
                 detection.column_key: detection
                 for detection in result.included_detections
@@ -1593,7 +1741,7 @@ def _write_workbook(
             }
             for offset, column in enumerate(columns):
                 detection = by_key.get(column.key)
-                col = 3 + offset
+                col = data_start + offset
                 if detection and detection.numeric_value is not None:
                     fmt = measurement_number_format(
                         detection.value_text, detection.review_required
@@ -1606,25 +1754,28 @@ def _write_workbook(
                         None,
                         warning if detection else measurement_number_format("0"),
                     )
-            tail_start = 3 + len(columns)
-            result_review = sum(
-                detection.status != "정상" for detection in result.included_detections
-            )
-            status_fmt = warning if result.status != "정상" else center
-            sheet.write_string(row, tail_start, result.status, status_fmt)
-            sheet.write_number(row, tail_start + 1, result_review, center)
-            sheet.write_number(row, tail_start + 2, result.elapsed_seconds, center)
-            sheet.write_string(row, tail_start + 3, str(result.path), normal)
+            if not compact:
+                tail_start = data_start + len(columns)
+                result_review = sum(d.status != "정상" for d in result.included_detections)
+                status_fmt = warning if result.status != "정상" else center
+                sheet.write_string(row, tail_start, result.status, status_fmt)
+                sheet.write_number(row, tail_start + 1, result_review, center)
+                sheet.write_number(row, tail_start + 2, result.elapsed_seconds, center)
+                sheet.write_string(row, tail_start + 3, str(result.path), normal)
 
         average_row = len(selected) + 1
         sheet.write_string(average_row, 0, "평균", average)
         sheet.write_string(average_row, 1, "", average)
-        sheet.write_string(average_row, 2, "숫자 셀 기준", average)
+        if not compact:
+            sheet.write_string(average_row, 2, "숫자 셀 기준", average)
         for offset, column in enumerate(columns):
-            col = 3 + offset
+            col = data_start + offset
             unit_consistent = units[column.key][1]
             stable_position = bool(column.point_name) or column.spread <= 0.18
-            if unit_consistent and stable_position:
+            unresolved = any(d.review_required or d.numeric_value is None
+                             for r in selected for d in r.included_detections
+                             if d.column_key == column.key)
+            if unit_consistent and stable_position and not unresolved:
                 col_name = xl_col_to_name(col)
                 values = [
                     detection.numeric_value
@@ -1640,19 +1791,21 @@ def _write_workbook(
                 else:
                     sheet.write_string(average_row, col, "값 없음", warning)
             else:
-                reason = "단위 확인 필요" if not unit_consistent else "위치 확인 필요"
+                reason = "단위 확인 필요" if not unit_consistent else ("값 확인 필요" if unresolved else "위치 확인 필요")
                 sheet.write_string(average_row, col, reason, warning)
         sheet.set_row(0, 26)
         sheet.set_row(average_row, 24)
         sheet.set_column(0, 0, 16)
-        sheet.set_column(1, 1, 12)
-        sheet.set_column(2, 2, 34)
+        sheet.set_column(data_start - 1, data_start - 1, 34)
+        if not compact:
+            sheet.set_column(1, 1, 12)
         if columns:
-            sheet.set_column(3, 2 + len(columns), 17)
-        tail_start = 3 + len(columns)
-        sheet.set_column(tail_start, tail_start + 2, 15)
-        sheet.set_column(tail_start + 3, tail_start + 3, 60)
-        sheet.freeze_panes(1, 3)
+            sheet.set_column(data_start, data_start + len(columns) - 1, 19)
+        if not compact:
+            tail_start = data_start + len(columns)
+            sheet.set_column(tail_start, tail_start + 2, 15)
+            sheet.set_column(tail_start + 3, tail_start + 3, 60)
+        sheet.freeze_panes(1, data_start)
         sheet.autofilter(0, 0, len(selected), len(headings) - 1)
         sheet.hide_gridlines(2)
         sheet.set_landscape()
@@ -1749,6 +1902,9 @@ def _write_workbook(
         detail.autofilter(0, 0, max(1, row - 1), len(detail_headers) - 1)
         detail.hide_gridlines(2)
 
+        if compact:
+            return measurement_count, review_count, len(columns)
+
         review = workbook.add_worksheet("검토 필요")
         review_headers = [
             "시료번호",
@@ -1838,8 +1994,6 @@ def verify_xlsx(path: str | os.PathLike[str]) -> None:
                 "xl/workbook.xml",
                 "xl/worksheets/sheet1.xml",
                 "xl/worksheets/sheet2.xml",
-                "xl/worksheets/sheet3.xml",
-                "xl/worksheets/sheet4.xml",
             }
             missing = required - set(archive.namelist())
             if missing:
@@ -1854,7 +2008,7 @@ def verify_xlsx(path: str | os.PathLike[str]) -> None:
             tag = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet"
             names = [node.attrib.get("name", "") for node in workbook.iter(tag)]
             expected = ["측정 데이터", "전체 검출 목록", "검토 필요", "설정 정보"]
-            if names != expected:
+            if names not in (expected, expected[:2]):
                 raise MeasurementError(f"시트 검증 실패: {names}")
     except zipfile.BadZipFile as exc:
         raise MeasurementError("올바른 XLSX 파일이 아닙니다.") from exc
@@ -1868,6 +2022,7 @@ def export_excel(
     *,
     template: MeasurementTemplate | None = None,
     overwrite: bool = False,
+    compact: bool = True,
 ) -> ExportSummary:
     destination = Path(output_path).expanduser().resolve()
     if destination.suffix.lower() != ".xlsx":
@@ -1882,7 +2037,7 @@ def export_excel(
     temporary = Path(temporary_name)
     try:
         measurement_count, review_count, column_count = _write_workbook(
-            temporary, results, template
+            temporary, results, template, compact=compact
         )
         verify_xlsx(temporary)
         os.replace(temporary, destination)

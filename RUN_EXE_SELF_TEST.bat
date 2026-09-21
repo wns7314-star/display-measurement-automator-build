@@ -9,7 +9,7 @@ if not exist "DisplayMeasurementAutomator.exe" (
   exit /b 1
 )
 
-DisplayMeasurementAutomator.exe --smoke-test
+start "" /wait "DisplayMeasurementAutomator.exe" --smoke-test
 if errorlevel 1 (
   echo 실행 파일 자체검사에 실패했습니다.
   pause
