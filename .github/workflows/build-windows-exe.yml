@@ -28,6 +28,18 @@ jobs:
       - name: Run source tests
         run: python -m unittest -v test_measurement_ocr_v2 test_regressions_v22
 
+      - name: Check Windows GUI construction
+        run: >-
+          python -c "import tkinter as tk; from display_measurement_automator_v2 import MeasurementAutomatorApp; root=tk.Tk(); root.withdraw(); app=MeasurementAutomatorApp(root); root.update(); assert not app.detailed_excel_var.get(); root.destroy()"
+
+      - name: Save synthetic OCR failure examples
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Synthetic_OCR_test_failures
+          path: ocr_test_failures/
+          if-no-files-found: ignore
+
       - name: Build Windows application
         run: pyinstaller --noconfirm --clean DisplayMeasurementAutomator.spec
 
@@ -64,4 +76,3 @@ jobs:
           name: DisplayMeasurementAutomator_Windows_v2.2.0
           path: DisplayMeasurementAutomator_Windows_v2.2.0.zip
           if-no-files-found: error
-

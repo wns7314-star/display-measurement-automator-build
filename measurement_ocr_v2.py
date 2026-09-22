@@ -837,6 +837,43 @@ def detect_unanchored_color_text(rgb: np.ndarray) -> list[tuple[Box, str]]:
     return deduped
 
 
+def detect_sparse_monochrome_text(rgb: np.ndarray) -> list[tuple[Box, str]]:
+    """Rescue thin grayscale glyphs on smooth local backgrounds.
+
+    Textured SEM tiles stay with the neural detector. A sparse-foreground check
+    avoids running recognition on hundreds of texture components.
+    """
+    height, width = rgb.shape[:2]
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    candidates = []
+    for tile in search_tiles(width, height):
+        local = gray[tile.y:tile.y2, tile.x:tile.x2]
+        p10, median, p90 = np.percentile(local, [10, 50, 90])
+        if p90 - p10 > 10:
+            continue
+        difference = np.abs(local.astype(np.float32) - median)
+        threshold = max(5, float(p90 - p10) * 2)
+        mask = np.uint8(difference >= threshold) * 255
+        fraction = np.count_nonzero(mask) / mask.size
+        if not 0 < fraction <= 0.08:
+            continue
+        joined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 13), np.uint8))
+        for box in _components(joined, 20):
+            if not (18 <= box.w <= 500 and 5 <= box.h <= 60 and box.w >= box.h * 1.8):
+                continue
+            # A word cut at an internal tile seam must be read from its neighbour.
+            if ((box.x <= 1 and tile.x > 0) or (box.x2 >= tile.w - 1 and tile.x2 < width)
+                or (box.y <= 1 and tile.y > 0) or (box.y2 >= tile.h - 1 and tile.y2 < height)):
+                continue
+            region = Box(tile.x + box.x - 5, tile.y + box.y - 4, box.w + 10, box.h + 8).clipped(width, height)
+            candidates.append((region, "horizontal"))
+    result = []
+    for region, orientation in sorted(candidates, key=lambda pair: pair[0].w * pair[0].h, reverse=True):
+        if not any(_same_text_box(region, other) for other, _ in result):
+            result.append((region, orientation))
+    return result
+
+
 def is_scale_bar_candidate(rgb: np.ndarray, box: Box, attempt: OCRAttempt) -> bool:
     """Only a unitless-name length near an actual footer bar is excluded.
 
@@ -1260,7 +1297,7 @@ def scan_image(
             )
             result.detections.extend(items)
 
-        for region, orientation in detect_unanchored_color_text(rgb):
+        for region, orientation in detect_unanchored_color_text(rgb) + detect_sparse_monochrome_text(rgb):
             if cancelled and cancelled():
                 raise BatchCancelled("사용자가 검사를 취소했습니다.")
             # Preserve the known anchor reading; this pass only rescues uncovered glyphs.

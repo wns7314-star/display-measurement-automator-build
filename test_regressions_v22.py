@@ -3,6 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 import zipfile
+import json
+import shutil
+from collections import Counter
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -49,6 +52,13 @@ class OCRRegressionTests(unittest.TestCase):
         result = scan_image(ImageIdentity(path, "1", 1), self.engine, deep_verify=deep)
         self.assertFalse(result.error, result.error)
         found = [(d.value_text, d.unit) for d in result.included_detections if d.value_text]
+        if Counter(found) != Counter(expected):
+            debug_dir = Path("ocr_test_failures")
+            debug_dir.mkdir(exist_ok=True)
+            shutil.copy2(path, debug_dir / path.name)
+            (debug_dir / (name + ".json")).write_text(json.dumps({"expected": expected, "found": found,
+                "detections": [{"box": d.box.as_tuple(), "raw": d.raw_text, "note": d.note} for d in result.detections]},
+                indent=2, ensure_ascii=False), encoding="utf-8")
         self.assertCountEqual(found, expected, [(d.raw_text, d.note) for d in result.detections])
         for d in result.detections:
             self.assertTrue(0 <= d.box.x < d.box.x2 <= result.image_width)
