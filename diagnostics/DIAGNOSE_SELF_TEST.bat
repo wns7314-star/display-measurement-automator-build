@@ -63,7 +63,7 @@ echo [SMOKE_TEST]>>"%DMA_LOG%"
 echo 필수 파일 확인 완료. 기존 EXE의 자체검사를 실행합니다. 잠시 기다려 주세요.
 start "" /wait "DisplayMeasurementAutomator.exe" --smoke-test >>"%DMA_LOG%" 2>&1
 set "DMA_EXIT=%ERRORLEVEL%"
-echo EXE_EXIT_CODE=%DMA_EXIT%>>"%DMA_LOG%"
+>>"%DMA_LOG%" echo EXE_EXIT_CODE=%DMA_EXIT%
 echo EXE_EXIT_CODE=%DMA_EXIT%
 if not "%DMA_EXIT%"=="0" goto runtime_failed
 echo RESULT=PASS>>"%DMA_LOG%"
