@@ -26,7 +26,7 @@ jobs:
           -r requirements.txt PyInstaller==6.16.0
 
       - name: Run source tests
-        run: python -m unittest -v test_measurement_ocr_v2 test_regressions_v22
+        run: python -m unittest -v test_measurement_ocr_v2 test_regressions_v22 test_ordering_v23
 
       - name: Check Windows GUI construction
         run: >-
@@ -68,11 +68,11 @@ jobs:
         shell: pwsh
         run: >-
           Compress-Archive -Path "dist\DisplayMeasurementAutomator"
-          -DestinationPath "DisplayMeasurementAutomator_Windows_v2.2.0.zip"
+          -DestinationPath "DisplayMeasurementAutomator_Windows_v2.3.0.zip"
 
       - name: Upload verified package
         uses: actions/upload-artifact@v4
         with:
-          name: DisplayMeasurementAutomator_Windows_v2.2.0
-          path: DisplayMeasurementAutomator_Windows_v2.2.0.zip
+          name: DisplayMeasurementAutomator_Windows_v2.3.0
+          path: DisplayMeasurementAutomator_Windows_v2.3.0.zip
           if-no-files-found: error

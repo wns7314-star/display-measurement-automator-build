@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 SUPPORTED_SUFFIXES = {
     ".bmp",
     ".dib",
@@ -380,7 +380,7 @@ def derive_group_order(
     detections: Sequence[MeasurementDetection],
 ) -> list[str]:
     output: list[str] = []
-    for detection in sorted(detections, key=lambda item: (item.box.y, item.box.x)):
+    for detection in sorted(detections, key=lambda item: (item.order, item.box.y, item.box.x)):
         if not detection.included:
             continue
         key = detection.group_key
@@ -403,7 +403,7 @@ def complete_group_order(
 
 
 def order_result_by_groups(
-    result: ImageScanResult, group_order: Sequence[str]
+    result: ImageScanResult, group_order: Sequence[str], *, preserve_within_group: bool = False
 ) -> list[str]:
     resolved = complete_group_order(group_order, result.detections)
     rank = {key: index for index, key in enumerate(resolved)}
@@ -411,6 +411,7 @@ def order_result_by_groups(
         (item for item in result.detections if item.included),
         key=lambda item: (
             rank.get(item.group_key, len(rank)),
+            item.order if preserve_within_group else 0,
             item.box.y,
             item.box.x,
             point_name_key(item.point_name),
@@ -424,6 +425,29 @@ def order_result_by_groups(
     for index, detection in enumerate(result.detections, 1):
         detection.order = index
     return resolved
+
+
+def move_detection_within_group(
+    result: ImageScanResult, detection: MeasurementDetection, direction: int
+) -> bool:
+    """Move one included value by one place without crossing a unit group.
+
+    The detection object (not its displayed row number) remains the selection.
+    A boundary, excluded/foreign value, or invalid direction is a no-op.
+    """
+    if direction not in (-1, 1) or not detection.included:
+        return False
+    ordered = result.included_detections
+    positions = [i for i, item in enumerate(ordered) if item.group_key == detection.group_key]
+    current = next((i for i, pos in enumerate(positions) if ordered[pos] is detection), None)
+    if current is None or not 0 <= current + direction < len(positions):
+        return False
+    left, right = positions[current], positions[current + direction]
+    ordered[left], ordered[right] = ordered[right], ordered[left]
+    result.detections[:] = ordered + [item for item in result.detections if not item.included]
+    for index, item in enumerate(result.detections, 1):
+        item.order = index
+    return True
 
 
 def _append_note(detection: MeasurementDetection, note: str) -> None:
@@ -1374,6 +1398,7 @@ def create_template_from_result(
         result.included_detections,
         key=lambda item: (
             rank.get(item.group_key, len(rank)),
+            item.order,
             item.box.y,
             item.box.x,
         ),
@@ -1486,6 +1511,8 @@ def _match_to_template(
             for detection_index, detection in enumerate(detections)
             if detection_index not in used_detections
             and point_name_key(detection.point_name) == key
+            and (point.group_key or measurement_group(point.expected_unit))
+            in ("unknown", detection.group_key)
         ]
         if not candidates:
             continue
@@ -1505,6 +1532,10 @@ def _match_to_template(
             if detection_index in used_detections:
                 continue
             if point_group != "unknown" and detection.group_key != point_group:
+                continue
+            # A different explicit point name is not a missing template point.
+            if (point_name_key(point.point_name) and point_name_key(detection.point_name)
+                    and point_name_key(point.point_name) != point_name_key(detection.point_name)):
                 continue
             distance = math.dist(
                 (point.x_norm, point.y_norm), detection.center_normalized
@@ -1564,9 +1595,7 @@ def assign_export_columns(
     extra_columns: list[ExportColumn] = []
     for _, detections in unmatched_by_result:
         used_keys: set[str] = set()
-        for detection in sorted(
-            detections, key=lambda item: (item.group_key, item.box.y, item.box.x)
-        ):
+        for detection in detections:
             point = detection.center_normalized
             name_key = point_name_key(detection.point_name)
             if name_key:
@@ -1575,6 +1604,7 @@ def assign_export_columns(
                     for column in extra_columns
                     if column.key not in used_keys
                     and point_name_key(column.point_name) == name_key
+                    and column.group_key == detection.group_key
                 ]
             else:
                 candidates = [
@@ -1620,9 +1650,13 @@ def assign_export_columns(
         if column.group_key not in group_order:
             group_order.append(column.group_key)
     rank = {key: index for index, key in enumerate(group_order)}
+    template_rank = {point.slot_id: index for index, point in enumerate(template_points)}
+    extra_rank = {column.key: index for index, column in enumerate(extra_columns)}
     columns.sort(
         key=lambda column: (
             rank.get(column.group_key, len(rank)),
+            0 if column.key in template_rank else 1,
+            template_rank.get(column.key, 0) if template else extra_rank[column.key],
             column.y_norm,
             column.x_norm,
             point_name_key(column.point_name),

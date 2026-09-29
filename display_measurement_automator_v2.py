@@ -26,6 +26,7 @@ from measurement_ocr_v2 import (
     load_template,
     mark_duplicate_point_names,
     measurement_group_label,
+    move_detection_within_group,
     order_result_by_groups,
     order_result_by_template,
     save_template,
@@ -153,7 +154,7 @@ class ReviewDialog:
                 result.detections,
             )
         for result in self.results:
-            order_result_by_groups(result, self.group_order)
+            order_result_by_groups(result, self.group_order, preserve_within_group=True)
 
         window = self.window = tk.Toplevel(parent)
         window.title("후보 이미지 · 측정값 검토")
@@ -166,7 +167,7 @@ class ReviewDialog:
         toolbar.pack(fill="x")
         ttk.Label(
             toolbar,
-            text="값·포인트명을 확인하고, 샘플에서 측정 그룹 순서를 지정하세요.",
+            text="값을 확인하고, 그룹 순서와 그룹 안의 값 순서를 지정하세요.",
             font=("맑은 고딕", 10, "bold"),
         ).pack(side="left")
         self.summary_var = tk.StringVar()
@@ -271,21 +272,39 @@ class ReviewDialog:
         ttk.Separator(controls, orient="vertical").pack(side="left", fill="y", padx=7)
         ttk.Button(controls, text="값 수정", command=self._edit_detection).pack(side="left")
         ttk.Button(controls, text="값 사용 전환", command=self._toggle_detection).pack(side="left", padx=(5, 0))
-        ttk.Button(
-            controls, text="그룹 위로", command=lambda: self._move_group(-1)
-        ).pack(side="left", padx=(5, 0))
-        ttk.Button(
-            controls, text="그룹 아래로", command=lambda: self._move_group(1)
-        ).pack(side="left", padx=(5, 0))
         ttk.Button(controls, text="누락 위치 추가", command=self._start_add).pack(side="left", padx=(5, 0))
-        ttk.Button(
-            controls,
-            text="현재 그룹 순서를 기준으로 설정",
-            command=self._set_template,
-        ).pack(side="right")
 
-        self.hint_var = tk.StringVar(value="상자를 선택하면 해당 위치가 파란색으로 표시됩니다.")
-        ttk.Label(right, textvariable=self.hint_var, foreground="#555555").pack(
+        value_controls = ttk.Frame(right, padding=(0, 5, 0, 0))
+        value_controls.pack(fill="x")
+        ttk.Label(value_controls, text="같은 그룹 안:", width=14).pack(side="left")
+        self.move_value_up_button = ttk.Button(
+            value_controls, text="값 위로", command=lambda: self._move_detection(-1)
+        )
+        self.move_value_up_button.pack(side="left")
+        self.move_value_down_button = ttk.Button(
+            value_controls, text="값 아래로", command=lambda: self._move_detection(1)
+        )
+        self.move_value_down_button.pack(side="left", padx=(5, 0))
+
+        group_controls = ttk.Frame(right, padding=(0, 5, 0, 0))
+        group_controls.pack(fill="x")
+        ttk.Label(group_controls, text="그룹 전체:", width=14).pack(side="left")
+        ttk.Button(
+            group_controls, text="그룹 위로", command=lambda: self._move_group(-1)
+        ).pack(side="left")
+        ttk.Button(
+            group_controls, text="그룹 아래로", command=lambda: self._move_group(1)
+        ).pack(side="left", padx=(5, 0))
+
+        self.set_template_button = ttk.Button(
+            right,
+            text="현재 순서를 기준으로 설정",
+            command=self._set_template,
+        )
+        self.set_template_button.pack(anchor="w", pady=(5, 3))
+
+        self.hint_var = tk.StringVar(value="값 선택 → 위/아래 이동 → [현재 순서를 기준으로 설정]")
+        ttk.Label(right, textvariable=self.hint_var, foreground="#555555", wraplength=480).pack(
             fill="x", pady=(0, 2)
         )
 
@@ -487,6 +506,25 @@ class ReviewDialog:
         self._draw_preview()
         self._update_summary()
 
+    def _move_detection(self, direction: int) -> None:
+        result = self._current_result()
+        detection = self._current_detection()
+        if result is None or detection is None:
+            self.hint_var.set("이동할 측정값 한 행을 먼저 선택하세요.")
+            return
+        if not detection.included:
+            self.hint_var.set("제외된 값입니다. [값 사용 전환] 후 순서를 바꿀 수 있습니다.")
+            return
+        if not move_detection_within_group(result, detection, direction):
+            self.hint_var.set("이 그룹의 처음 또는 마지막 값입니다. 다른 그룹으로는 이동하지 않습니다.")
+            return
+        self.current_detection_index = result.detections.index(detection)
+        self._refresh_detection_tree()
+        self.detection_tree.see(str(self.current_detection_index))
+        self._draw_preview()
+        self._update_summary()
+        self.hint_var.set("순서를 바꿨습니다. 다른 이미지·Excel에 적용하려면 [현재 순서를 기준으로 설정]")
+
     def _move_group(self, direction: int) -> None:
         result = self._current_result()
         detection = self._current_detection()
@@ -505,12 +543,13 @@ class ReviewDialog:
             self.group_order[index],
         )
         for item in self.results:
-            order_result_by_groups(item, self.group_order)
+            order_result_by_groups(item, self.group_order, preserve_within_group=True)
         self.current_detection_index = result.detections.index(detection)
         self._refresh_detection_tree()
         self.detection_tree.selection_set(str(self.current_detection_index))
         self._draw_preview()
         self._update_summary()
+        self.hint_var.set("그룹을 옮겼습니다. Excel에 적용하려면 [현재 순서를 기준으로 설정]")
 
     def _apply_group_order(
         self, selected_detection: MeasurementDetection | None = None
@@ -518,7 +557,7 @@ class ReviewDialog:
         for item in self.results:
             self.group_order = complete_group_order(self.group_order, item.detections)
         for item in self.results:
-            order_result_by_groups(item, self.group_order)
+            order_result_by_groups(item, self.group_order, preserve_within_group=True)
         result = self._current_result()
         if result is not None and selected_detection in result.detections:
             self.current_detection_index = result.detections.index(selected_detection)
@@ -623,10 +662,12 @@ class ReviewDialog:
         self._show_result(self.current_result_index)
         messagebox.showinfo(
             "기준 순서 설정",
-            f"{result.path.name}의 그룹 순서를 기준으로 적용했습니다.\n"
-            "같은 그룹 안에서는 이미지 위치 순서로 정렬됩니다.",
+            f"{result.path.name}의 그룹 순서와 그룹 안의 값 순서를 적용했습니다.\n"
+            "다른 이미지는 포인트명 또는 위치로 대응시킵니다.\n"
+            "Excel 열에도 이 순서가 적용됩니다. 새 값은 해당 그룹 뒤에 추가됩니다.",
             parent=self.window,
         )
+        self.hint_var.set("기준 순서를 적용했습니다. [검토 완료] 후 [기준 순서 저장]으로 다시 사용할 수 있습니다.")
 
     def _update_summary(self) -> None:
         selected = [result for result in self.results if result.selected]
@@ -831,6 +872,9 @@ class MeasurementAutomatorApp:
                 self.status_var.set(f"{index}/{total} 검사 중: {name}")
             elif kind == "done":
                 self.results = event[1]  # type: ignore[assignment]
+                if self.template is not None:
+                    for result in self.results:
+                        order_result_by_template(result, self.template)
                 failed = sum(bool(result.error) for result in self.results)
                 candidates = sum(result.selected for result in self.results)
                 values = sum(len(result.detections) for result in self.results)
@@ -961,7 +1005,7 @@ class MeasurementAutomatorApp:
 
 
 def runtime_smoke_test() -> bool:
-    """Exercise local models, edge discovery, faint text and the XLSX writer."""
+    """Exercise local OCR, custom order, reference round-trip and Excel export."""
 
     import cv2
     import numpy as np
@@ -1005,8 +1049,25 @@ def runtime_smoke_test() -> bool:
         values = {(d.value_text, d.unit) for d in result.included_detections}
         if result.error or values != {("15.2", "°"), ("28.4", "°"), ("167.5", "nm")}:
             return False
+        order_result_by_groups(result, ["angle", "length"])
+        angle = next(d for d in result.detections if d.value_text == "28.4")
+        if not move_detection_within_group(result, angle, -1):
+            return False
+        template = create_template_from_result(result, ["angle", "length"])
+        template_path = Path(directory) / "order.json"
+        save_template(template, template_path)
+        template = load_template(template_path)
+        restored = copy.deepcopy(result)
+        order_result_by_groups(restored, ["length", "angle"])
+        order_result_by_template(restored, template)
+        if [d.value_text for d in restored.included_detections] != ["28.4", "15.2", "167.5"]:
+            return False
+        from measurement_ocr_v2 import assign_export_columns
+        columns = assign_export_columns([restored], template)
+        if [d.column_key for d in restored.included_detections] != [c.key for c in columns]:
+            return False
         output = Path(directory) / "self_test.xlsx"
-        export_excel([result], output)
+        export_excel([restored], output, template=template)
         verify_xlsx(output)
     return True
 

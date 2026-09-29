@@ -15,7 +15,7 @@ if errorlevel 1 goto failed
 call .build_venv\Scripts\activate.bat
 python -m pip install --disable-pip-version-check -r requirements.txt PyInstaller==6.16.0
 if errorlevel 1 goto failed
-python -m unittest -v test_measurement_ocr_v2 test_regressions_v22
+python -m unittest -v test_measurement_ocr_v2 test_regressions_v22 test_ordering_v23
 if errorlevel 1 goto failed
 pyinstaller --noconfirm --clean DisplayMeasurementAutomator.spec
 if errorlevel 1 goto failed

@@ -7,7 +7,7 @@ where py >nul 2>&1
 if errorlevel 1 goto use_python
 py -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto failed
-py -m unittest -v test_measurement_ocr_v2 test_regressions_v22
+py -m unittest -v test_measurement_ocr_v2 test_regressions_v22 test_ordering_v23
 if errorlevel 1 goto failed
 py benchmark_120_points.py
 if errorlevel 1 goto failed
@@ -16,7 +16,7 @@ goto passed
 :use_python
 python -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto failed
-python -m unittest -v test_measurement_ocr_v2 test_regressions_v22
+python -m unittest -v test_measurement_ocr_v2 test_regressions_v22 test_ordering_v23
 if errorlevel 1 goto failed
 python benchmark_120_points.py
 if errorlevel 1 goto failed
