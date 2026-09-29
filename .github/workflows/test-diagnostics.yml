@@ -1,0 +1,45 @@
+name: Verify v2.2.0 diagnostic helper
+on:
+  pull_request:
+    paths:
+      - 'diagnostics/**'
+      - '.github/workflows/test-diagnostics.yml'
+  workflow_dispatch:
+jobs:
+  diagnostics:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download the actual previously delivered package
+        uses: actions/download-artifact@v4
+        with:
+          name: DisplayMeasurementAutomator_Windows_v2.2.0
+          run-id: 35705695447
+          github-token: ${{ github.token }}
+          path: original-package
+      - name: Extract original package
+        shell: pwsh
+        run: Expand-Archive -Path original-package/DisplayMeasurementAutomator_Windows_v2.2.0.zip -DestinationPath original-package/unpacked
+      - name: Test diagnostics with original EXE and failure fixtures
+        run: python diagnostics/test_launcher_windows.py original-package/unpacked/DisplayMeasurementAutomator
+      - name: Preserve diagnostic test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Diagnostic_helper_test_reports
+          path: diagnostic_test_logs/
+          if-no-files-found: ignore
+      - name: Prepare helper ZIP
+        shell: pwsh
+        run: Compress-Archive -Path diagnostics/DIAGNOSE_SELF_TEST.bat,diagnostics/READ_ME_KO.txt -DestinationPath DMA_v2.2.0_Diagnostic_Helper.zip
+      - name: Upload verified helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: DMA_v2.2.0_Diagnostic_Helper
+          path: DMA_v2.2.0_Diagnostic_Helper.zip
