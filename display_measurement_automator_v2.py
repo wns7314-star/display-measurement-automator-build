@@ -389,7 +389,11 @@ class ReviewDialog:
         selection = self.image_tree.selection()
         if not selection:
             return
-        self._show_result(int(selection[0]))
+        index = int(selection[0])
+        # Rebuilding the image list queues another selection event. Do not
+        # clear the selected measurement unless the user changed the image.
+        if index != self.current_result_index:
+            self._show_result(index)
 
     def _show_result(self, index: int) -> None:
         self.current_result_index = index
